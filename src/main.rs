@@ -185,7 +185,8 @@ async fn unpack_zip<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec:
 
     loop {
         match zip_reader.next_with_entry().await? {
-            None => break,
+            // 🌟 核心修正 1：让 break 返回预期类型 Ok(())
+            None => break Ok(()),
             Some(mut entry_reader) => {
                 let filename_str = entry_reader.reader().entry().filename().as_str()?;
                 let filename_owned = filename_str.to_string();
@@ -225,7 +226,7 @@ async fn unpack_zip<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec:
                 }
             }
         }
-    }
+    } // 🌟 核心修正 2：确保 loop 大括号安全闭合且函数流正常结束
 }
 
 fn unpack_7z(buffer: Vec<u8>, target_dir: &str, set_exec: bool) -> Result<()> {
