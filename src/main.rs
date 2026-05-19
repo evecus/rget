@@ -145,39 +145,41 @@ async fn unpack_tar<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) 
 
 /// 流式解包 zip 格式
 async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) -> Result<()> {
-    // 引入桥接和 futures 专用的 I/O 特征
     use tokio_util::compat::TokioAsyncReadCompatExt;
     
-    // 1. 将 Tokio Reader 一键转换成符合 async_zip 胃口的 futures::io::AsyncRead
+    // 1. 将 Tokio Reader 转换为 async_zip 需要的 futures::io::AsyncRead
     let compat_reader = reader.compat();
     let mut zip_reader = async_zip::base::read::stream::ZipFileReader::new(compat_reader);
 
-    // 2. 利用 async_zip 原生的迭代流
+    // 2. 循环获取持有读取锁的临时状态
     while let Some(mut entry_reader) = zip_reader.next_with_entry().await? {
         
-        // 🌟 正确拿元数据的解法：在 0.0.16 中，Reading 状态通过 .reader() 方法拿到外部引用的元数据
+        // 核心修复 1：通过 .reader() 拿到元数据，再通过 .as_str() 将 ZipString 转为 &str
         let entry_info = entry_reader.reader().entry();
-        let path = Path::new(entry_info.filename());
+        let filename_str = entry_info.filename().as_str()?;
+        let path = Path::new(filename_str);
         
         if path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
             continue;
         }
 
-        if entry_info.dir() {
+        // 核心修复 2：dir() 返回的是 Result，必须加 ? 提取出 bool
+        if entry_info.dir()? {
             tokio::fs::create_dir_all(path).await?;
         } else {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            // 3. 这里的核心冲突在于 entry_reader 实现了 `futures::io::AsyncRead`
-            // 我们不把它强转回 tokio。相反，我们创建一个普通的 std::fs::File 并包装为 futures 兼容的写端：
+            // 用标准库创建文件，并包裹为 futures 的 Writer
             let file = std::fs::File::create(path)?;
-            // 使用 futures 库自带的 AllowStdIo 将标准写端桥接过去
             let mut futures_writer = futures::io::AllowStdIo::new(file);
 
-            // 使用 futures 库自带的异步 copy 算子进行拷贝，两条都是 futures 派系的流，完美相容！
-            futures::io::copy(&mut entry_reader, &mut futures_writer)
+            // 核心修复 3：通过 .reader_mut() 拿到真正实现了 futures::AsyncRead 的 ZipEntryReader 结构体
+            let mut actual_reader = entry_reader.reader_mut();
+
+            // 两条 futures 流完美对接
+            futures::io::copy(&mut actual_reader, &mut futures_writer)
                 .await
                 .context("解压并写入 ZIP 内部文件失败")?;
             
