@@ -9,7 +9,11 @@ use std::path::Path;
 use tokio::io::{AsyncRead, BufReader};
 
 #[derive(Parser, Debug)]
-#[command(name = "rwgt", version, about = "A streaming download and extraction tool")]
+#[command(
+    name = "rwgt",
+    version,
+    about = "A streaming download and extraction tool"
+)]
 struct Args {
     /// Download URL
     url: String,
@@ -56,8 +60,10 @@ async fn main() -> Result<()> {
     };
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner} [{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} ({eta}) {msg}")?
-            .progress_chars("#>-")
+            .template(
+                "{spinner} [{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} ({eta}) {msg}",
+            )?
+            .progress_chars("#>-"),
     );
 
     let mut buffer = Vec::new();
@@ -103,11 +109,11 @@ async fn main() -> Result<()> {
                 "extracted_file"
             };
             let final_path = Path::new(&args.directory).join(out_name);
-            
+
             if let Some(parent) = final_path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
-            
+
             let mut out_file = tokio::fs::File::create(&final_path).await?;
             tokio::io::copy(&mut decoder, &mut out_file).await?;
             println!("Extracted: {:?}", final_path);
@@ -153,7 +159,11 @@ fn extract_filename_from_url(url: &str) -> String {
     "downloaded_file".to_string()
 }
 
-async fn unpack_tar<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec: bool) -> Result<()> {
+async fn unpack_tar<R: AsyncRead + Unpin>(
+    reader: R,
+    target_dir: &str,
+    set_exec: bool,
+) -> Result<()> {
     let mut archive = tokio_tar::Archive::new(reader);
     let mut entries = archive.entries()?;
     tokio::fs::create_dir_all(target_dir).await?;
@@ -162,7 +172,10 @@ async fn unpack_tar<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec:
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
 
-        if path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
+        if path
+            .to_str()
+            .map_or(false, |s| s.starts_with("..") || s.starts_with('/'))
+        {
             continue;
         }
 
@@ -177,7 +190,11 @@ async fn unpack_tar<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec:
     Ok(())
 }
 
-async fn unpack_zip<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec: bool) -> Result<()> {
+async fn unpack_zip<R: AsyncRead + Unpin>(
+    reader: R,
+    target_dir: &str,
+    set_exec: bool,
+) -> Result<()> {
     use tokio_util::compat::TokioAsyncReadCompatExt;
     let compat_reader = reader.compat();
     let mut zip_reader = async_zip::base::read::stream::ZipFileReader::new(compat_reader);
@@ -192,7 +209,10 @@ async fn unpack_zip<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec:
                 let filename_owned = filename_str.to_string();
                 let rel_path = Path::new(&filename_owned);
 
-                if rel_path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
+                if rel_path
+                    .to_str()
+                    .map_or(false, |s| s.starts_with("..") || s.starts_with('/'))
+                {
                     zip_reader = entry_reader.skip().await?;
                     continue;
                 }
@@ -235,39 +255,48 @@ fn unpack_7z(buffer: Vec<u8>, target_dir: &str, set_exec: bool) -> Result<()> {
     std::fs::create_dir_all(target_path)?;
 
     let mut archive = sevenz_rust::SevenZReader::new(
-        &mut cursor, 
-        get_sevenz_len_hint(target_dir), 
-        sevenz_rust::Password::empty()
-    ).map_err(|e| anyhow::anyhow!("Failed to open 7z archive: {:?}", e))?;
+        &mut cursor,
+        get_sevenz_len_hint(target_dir),
+        sevenz_rust::Password::empty(),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to open 7z archive: {:?}", e))?;
 
-    archive.for_each_entries(|entry, reader| {
-        let rel_path = Path::new(entry.name());
-        if rel_path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
-            return Ok(true);
-        }
-
-        let final_path = target_path.join(rel_path);
-
-        if entry.is_directory() {
-            std::fs::create_dir_all(&final_path)?;
-        } else {
-            if let Some(parent) = final_path.parent() {
-                std::fs::create_dir_all(parent)?;
+    archive
+        .for_each_entries(|entry, reader| {
+            let rel_path = Path::new(entry.name());
+            if rel_path
+                .to_str()
+                .map_or(false, |s| s.starts_with("..") || s.starts_with('/'))
+            {
+                return Ok(true);
             }
-            let mut file = std::fs::File::create(&final_path)?;
-            std::io::copy(reader, &mut file)?;
-            println!("Extracted: {:?}", final_path);
 
-            if set_exec {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&final_path, std::fs::Permissions::from_mode(0o755));
+            let final_path = target_path.join(rel_path);
+
+            if entry.is_directory() {
+                std::fs::create_dir_all(&final_path)?;
+            } else {
+                if let Some(parent) = final_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut file = std::fs::File::create(&final_path)?;
+                std::io::copy(reader, &mut file)?;
+                println!("Extracted: {:?}", final_path);
+
+                if set_exec {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            &final_path,
+                            std::fs::Permissions::from_mode(0o755),
+                        );
+                    }
                 }
             }
-        }
-        Ok(true)
-    }).map_err(|e| anyhow::anyhow!("Failed to extract 7z entry: {:?}", e))?;
+            Ok(true)
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to extract 7z entry: {:?}", e))?;
 
     Ok(())
 }
