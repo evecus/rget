@@ -145,22 +145,31 @@ async fn unpack_tar<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) 
 
 /// 流式解包 zip 格式
 async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) -> Result<()> {
-    // 核心修复 3: 修正 async_zip 的结构体路径
-    let mut zip_reader = async_zip::base::read::stream::ZipFileReader::new(reader);
+    // 引入桥接扩展特征
+    use tokio_util::compat::TokioAsyncReadCompatExt;
 
-    while let Some(entry) = zip_reader.next().await {
-        let entry = entry?;
-        let path = Path::new(entry.entry().filename());
+    // 核心修改 1：使用 .compat() 将 Tokio 的 AsyncRead 转换为 async_zip 需要的 futures::io::AsyncRead
+    let mut zip_reader = async_zip::base::read::stream::ZipFileReader::new(reader.compat());
+
+    // 核心修改 2：async_zip 0.0.16 流式读取特征是 next_with_entry()，而不是 next()
+    while let Some(mut entry_reader) = zip_reader.next_with_entry().await? {
+        let path = Path::new(entry_reader.config().filename());
         
         if path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
             continue;
         }
 
-        if entry.entry().dir() {
+        if entry_reader.config().dir() {
             tokio::fs::create_dir_all(path).await?;
         } else {
+            // 如果有上级目录但未独立声明，先创建父级目录
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+
             let mut file = tokio::fs::File::create(path).await?;
-            let mut entry_reader = entry.read_to_end();
+            
+            // entry_reader 本身就是满足 tokio::io::AsyncRead 的（它内部做了处理）
             tokio::io::copy(&mut entry_reader, &mut file).await?;
             println!("📄 解压出: {:?}", path);
 
@@ -171,7 +180,6 @@ async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) 
     }
     Ok(())
 }
-
 /// 给文件赋予 755 权限
 #[cfg(unix)]
 fn set_executable(path: &Path) -> Result<()> {
