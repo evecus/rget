@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     };
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")?
+            .template("{spinner} [{elapsed_precise}] [{wide_bar}] {bytes}/{total_bytes} ({eta}) {msg}")?
             .progress_chars("#>-")
     );
 
@@ -226,15 +226,13 @@ async fn unpack_zip<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec:
             }
         }
     }
-    Ok(())
-}
+    }
 
 fn unpack_7z(buffer: Vec<u8>, target_dir: &str, set_exec: bool) -> Result<()> {
     let mut cursor = Cursor::new(buffer);
     let target_path = Path::new(target_dir);
     std::fs::create_dir_all(target_path)?;
 
-    // Pass sevenz_rust::Password::empty() as the 3rd argument
     let mut archive = sevenz_rust::SevenZReader::new(
         &mut cursor, 
         get_sevenz_len_hint(target_dir), 
