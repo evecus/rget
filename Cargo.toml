@@ -8,6 +8,8 @@ clap = { version = "4.4", features = ["derive"] }
 # 关闭默认特性，使用 rustls 替代 openssl，实现纯静态编译
 reqwest = { version = "0.11", default-features = false, features = ["stream", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
+# 核心添加: tokio-util 用于高效安全地完成 Stream -> AsyncRead 的类型转换
+tokio-util = { version = "0.7", features = ["io"] }
 futures = "0.3"
 anyhow = "1.0"
 async-compression = { version = "0.4", features = ["tokio", "gzip", "xz", "bzip2", "zstd"] }
