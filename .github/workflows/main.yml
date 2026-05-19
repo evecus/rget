@@ -62,14 +62,14 @@ jobs:
     - name: Package Binary
       run: |
         cd target/${{ matrix.target }}/release
-        tar czf ../../../rwgt-linux-${{ matrix.suffix }}.tar.gz rwgt
+        tar czf ../../../rget-linux-${{ matrix.suffix }}.tar.gz rget
         cd ../../..
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: rwgt-linux-${{ matrix.suffix }}
-        path: rwgt-linux-${{ matrix.suffix }}.tar.gz
+        name: rget-linux-${{ matrix.suffix }}
+        path: rget-linux-${{ matrix.suffix }}.tar.gz
 
   release:
     needs: build
@@ -84,7 +84,7 @@ jobs:
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: rwgt-linux-*
+          pattern: rget-linux-*
           path: ./artifacts
           merge-multiple: true
 
