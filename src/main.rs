@@ -5,7 +5,7 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::io::{AsyncRead, BufReader};
 
 #[derive(Parser, Debug)]
@@ -234,9 +234,12 @@ fn unpack_7z(buffer: Vec<u8>, target_dir: &str, set_exec: bool) -> Result<()> {
     let target_path = Path::new(target_dir);
     std::fs::create_dir_all(target_path)?;
 
-    // Use standard ASCII helper function name
-    let mut archive = sevenz_rust::SevenZReader::new(&mut cursor, get_sevenz_len_hint(target_dir))
-        .map_err(|e| anyhow::anyhow!("Failed to open 7z archive: {:?}", e))?;
+    // Pass sevenz_rust::Password::empty() as the 3rd argument
+    let mut archive = sevenz_rust::SevenZReader::new(
+        &mut cursor, 
+        get_sevenz_len_hint(target_dir), 
+        sevenz_rust::Password::empty()
+    ).map_err(|e| anyhow::anyhow!("Failed to open 7z archive: {:?}", e))?;
 
     archive.for_each_entries(|entry, reader| {
         let rel_path = Path::new(entry.name());
