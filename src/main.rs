@@ -226,7 +226,7 @@ async fn unpack_zip<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec:
             }
         }
     }
-    }
+}
 
 fn unpack_7z(buffer: Vec<u8>, target_dir: &str, set_exec: bool) -> Result<()> {
     let mut cursor = Cursor::new(buffer);
