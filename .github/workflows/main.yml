@@ -1,4 +1,4 @@
-name: Build and Release on Tag
+name: Build Musl Release on Tag
 
 on:
   workflow_dispatch:
@@ -10,12 +10,14 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            suffix: amd64
-            need_cross_toolchain: false
-          - target: aarch64-unknown-linux-gnu
-            suffix: arm64
-            need_cross_toolchain: true
+          - target: x86_64-unknown-linux-musl
+            suffix: amd64-musl
+            linker: x86_64-linux-musl-gcc
+            apt_packages: musl-tools
+          - target: aarch64-unknown-linux-musl
+            suffix: arm64-musl
+            linker: aarch64-linux-gnu-gcc
+            apt_packages: gcc-aarch64-linux-gnu
 
     steps:
     - name: Checkout code
@@ -28,19 +30,17 @@ jobs:
         target: ${{ matrix.target }}
         override: true
 
-    - name: Install cross-compilation tools (ARM64)
-      if: matrix.need_cross_toolchain
+    - name: Install cross-compilation tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc-aarch64-linux-gnu
+        sudo apt-get install -y ${{ matrix.apt_packages }}
 
-    - name: Configure Cargo for ARM64
-      if: matrix.need_cross_toolchain
+    - name: Configure Cargo Linker
       run: |
         mkdir -p .cargo
         cat > .cargo/config.toml << EOF
-        [target.aarch64-unknown-linux-gnu]
-        linker = "aarch64-linux-gnu-gcc"
+        [target.${{ matrix.target }}]
+        linker = "${{ matrix.linker }}"
         EOF
 
     - name: Build Release
@@ -68,13 +68,13 @@ jobs:
       - name: Download AMD64 Artifact
         uses: actions/download-artifact@v3
         with:
-          name: rwgt-linux-amd64
+          name: rwgt-linux-amd64-musl
           path: ./artifacts
       
       - name: Download ARM64 Artifact
         uses: actions/download-artifact@v3
         with:
-          name: rwgt-linux-arm64
+          name: rwgt-linux-arm64-musl
           path: ./artifacts
 
       - name: Create GitHub Release
