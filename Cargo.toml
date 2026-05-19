@@ -9,11 +9,13 @@ reqwest = { version = "0.11", default-features = false, features = ["stream", "r
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 anyhow = "1.0"
-# 纯 Rust 解压后端，不依赖宿主机交叉编译 C 链
-async-compression = { version = "0.4", features = ["tokio", "gzip", "xz", "bzip2", "zstd-lz4-flex"] }
+
+# 🌟 核心修正：关闭默认特性，明确引入无冲突的算法
+async-compression = { version = "0.4", default-features = false, features = ["tokio", "gzip", "xz", "bzip2", "zstd"] }
 tokio-tar = "0.3"
 async_zip = { version = "0.0.16", features = ["deflate"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
-# 关闭 7z 的默认 C 语言 zstd 绑定，仅保留纯 Rust 基础功能
+
+# 🌟 核心修正：关闭 7z 的默认 C 语言 zstd 绑定，仅保留纯 Rust 基础功能
 sevenz-rust = { version = "0.6", default-features = false, features = ["rand", "bzip2"] }
 indicatif = { version = "0.17", features = ["tokio"] }
