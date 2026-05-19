@@ -1,5 +1,5 @@
 [package]
-name = "rget"
+name = "rwgt"
 version = "0.1.0"
 edition = "2021"
 
@@ -13,5 +13,5 @@ async-compression = { version = "0.4", features = ["tokio", "gzip", "xz", "bzip2
 tokio-tar = "0.3"
 async_zip = { version = "0.0.16", features = ["deflate"] }
 tokio-util = { version = "0.7", features = ["io", "compat"] }
-sevenz-rust = { version = "0.6", features = ["full"] }
+sevenz-rust = { version = "0.6", features = ["zstd", "bzip2"] }
 indicatif = { version = "0.17", features = ["tokio"] }
