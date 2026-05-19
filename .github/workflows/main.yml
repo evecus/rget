@@ -1,12 +1,19 @@
 name: Build Musl Release on Tag
 
+# 1. 真正的 Tag 触发器 + 保留手动触发备用
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
+
+# 2. 必须显式赋予写权限，否则无法创建 Release
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     strategy:
       matrix:
         include:
@@ -16,24 +23,30 @@ jobs:
             apt_packages: musl-tools
           - target: aarch64-unknown-linux-musl
             suffix: arm64-musl
+            # 修正：ARM64 musl 交叉编译所需的工具链
             linker: aarch64-linux-gnu-gcc
-            apt_packages: gcc-aarch64-linux-gnu
+            apt_packages: gcc-aarch64-linux-gnu musl-tools
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # 提示：actions-rs 系列已被社区废弃，换成官方维护更积极的工具链 Action
     - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v2
+      uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
-        target: ${{ matrix.target }}
-        override: true
+        targets: ${{ matrix.target }}
 
     - name: Install cross-compilation tools
       run: |
         sudo apt-get update
         sudo apt-get install -y ${{ matrix.apt_packages }}
+
+    # 针对 ARM64 musl 的特殊补丁：让 gnu 编译器知道如何链接 musl
+    - name: Setup ARM64 Musl Linker Patch
+      if: matrix.target == 'aarch64-unknown-linux-musl'
+      run: |
+        sudo ln -s /usr/aarch64-linux-gnu/lib /usr/lib/aarch64-linux-musl
 
     - name: Configure Cargo Linker
       run: |
@@ -44,10 +57,7 @@ jobs:
         EOF
 
     - name: Build Release
-      uses: actions-rs/cargo@v2
-      with:
-        command: build
-        args: --release --target ${{ matrix.target }}
+      run: cargo build --release --target ${{ matrix.target }}
 
     - name: Package Binary
       run: |
@@ -64,24 +74,26 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # 只有在真正推 Tag 或者手动触发时才跑 Release（防止平时测试分支报错）
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
-      - name: Download AMD64 Artifact
-        uses: actions/download-artifact@v3
-        with:
-          name: rwgt-linux-amd64-musl
-          path: ./artifacts
-      
-      - name: Download ARM64 Artifact
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 统一使用 v4，并合并成一次性下载所有前缀符合的产物
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: rwgt-linux-arm64-musl
+          pattern: rwgt-linux-*
           path: ./artifacts
+          merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.0
-          name: rget v0.1.0
+          # 动态获取当前的 Tag 名字（比如 v1.0.2），若手动触发则兜底
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
           files: ./artifacts/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
