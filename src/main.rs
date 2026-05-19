@@ -1,0 +1,182 @@
+use anyhow::{Context, Result};
+use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
+use clap::Parser;
+use futures::stream::TryStreamExt;
+use reqwest::Client;
+use std::path::Path;
+use tokio::io::AsyncReadExt;
+use tokio_tar::Archive;
+
+/// rwgt - 一个类似 wget 的流式下载解压工具
+#[derive(Parser, Debug)]
+#[command(name = "rwgt", version, about)]
+struct Args {
+    /// 下载链接
+    url: String,
+
+    /// 指定输出文件名 (如果不指定则从URL提取)
+    #[arg(short = 'o')]
+    output: Option<String>,
+
+    /// 智能识别格式并流式解压下载的压缩包
+    #[arg(short = 'u')]
+    unzip: bool,
+
+    /// 给下载或解压出的文件赋予 755 权限
+    #[arg(short = 'x')]
+    executable: bool,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+
+    let client = Client::new();
+    let response = client
+        .get(&args.url)
+        .send()
+        .await
+        .context("无法连接到目标URL")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("下载失败，HTTP 状态码: {}", response.status());
+    }
+
+    // 获取文件名
+    let filename = args.output.clone().unwrap_or_else(|| {
+        extract_filename_from_url(&args.url)
+    });
+
+    println!("🚀 开始下载: {}", args.url);
+
+    // 将 HTTP 流转换为 AsyncRead
+    let stream = response.bytes_stream();
+    let reader = stream
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .into_async_read();
+
+    if args.unzip {
+        println!("📦 检测到 -u 参数，启动流式解压...");
+        let lower_name = filename.to_lowercase();
+        
+        // 根据后缀智能选择解压流
+        if lower_name.ends_with(".tar.gz") || lower_name.ends_with(".tgz") {
+            let decoder = GzipDecoder::new(reader);
+            unpack_tar(decoder, args.executable).await?;
+        } else if lower_name.ends_with(".tar.xz") {
+            let decoder = XzDecoder::new(reader);
+            unpack_tar(decoder, args.executable).await?;
+        } else if lower_name.ends_with(".tar.bz2") {
+            let decoder = BzDecoder::new(reader);
+            unpack_tar(decoder, args.executable).await?;
+        } else if lower_name.ends_with(".tar.zst") {
+            let decoder = ZstdDecoder::new(reader);
+            unpack_tar(decoder, args.executable).await?;
+        } else if lower_name.ends_with(".zip") {
+            // ZIP 格式的流式解压
+            unpack_zip(reader, args.executable).await?;
+        } else {
+            println!("⚠️ 无法识别的压缩格式，按原始文件保存为: {}", filename);
+            save_file(reader, &filename, args.executable).await?;
+        }
+    } else {
+        save_file(reader, &filename, args.executable).await?;
+    }
+
+    println!("✅ 完成!");
+    Ok(())
+}
+
+fn extract_filename_from_url(url: &str) -> String {
+    url.split('/')
+        .last()
+        .unwrap_or("downloaded_file")
+        .split('?')
+        .next()
+        .unwrap_or("downloaded_file")
+        .to_string()
+}
+
+/// 流式保存单文件
+async fn save_file<R: tokio::io::AsyncRead + Unpin>(reader: R, filename: &str, set_exec: bool) -> Result<()> {
+    let path = Path::new(filename);
+    let mut file = tokio::fs::File::create(path).await.context("创建文件失败")?;
+    let mut buf_reader = tokio::io::BufReader::new(reader);
+    
+    // 流式拷贝，不占用大内存
+    tokio::io::copy(&mut buf_reader, &mut file).await.context("写入文件失败")?;
+    println!("💾 文件已保存至: {}", filename);
+
+    if set_exec {
+        set_executable(path)?;
+    }
+    Ok(())
+}
+
+/// 流式解包 tar 系列格式
+async fn unpack_tar<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) -> Result<()> {
+    let mut archive = Archive::new(reader);
+    let mut entries = archive.entries()?;
+    
+    while let Some(entry) = entries.next().await {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        
+        // 确保解压路径安全，防止路径遍历攻击
+        if path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
+            continue;
+        }
+
+        entry.unpack_in(".").await?;
+        println!("📄 解压出: {:?}", path);
+
+        if set_exec {
+            set_executable(&path)?;
+        }
+    }
+    Ok(())
+}
+
+/// 流式解包 zip 格式
+async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) -> Result<()> {
+    let mut zip_reader = async_zip::read::stream::ZipFileReader::new(reader);
+
+    while let Some(entry) = zip_reader.next().await {
+        let entry = entry?;
+        let path = Path::new(entry.entry().filename());
+        
+        if path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
+            continue;
+        }
+
+        if entry.entry().dir() {
+            tokio::fs::create_dir_all(path).await?;
+        } else {
+            let mut file = tokio::fs::File::create(path).await?;
+            let mut entry_reader = entry.read_to_end();
+            tokio::io::copy(&mut entry_reader, &mut file).await?;
+            println!("📄 解压出: {:?}", path);
+
+            if set_exec {
+                set_executable(path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 给文件赋予 755 权限
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .context(format!("设置权限失败: {:?}", path))?;
+    println!("🔓 已赋予 755 权限: {:?}", path);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<()> {
+    println!("⚠️ 当前系统不支持 Unix 权限设置，已忽略 -x 参数");
+    Ok(())
+}

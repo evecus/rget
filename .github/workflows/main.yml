@@ -1,0 +1,181 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # ── 1. 交叉编译三个平台的二进制 ──────────────────────────────────
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            artifact: iptv-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            artifact: iptv-linux-arm64
+          - target: armv7-unknown-linux-musleabihf
+            artifact: iptv-linux-armv7
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cache Rust registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build
+        run: |
+          cross build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/iptv-speed-tester ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 1
+
+  # ── 2. 下载已构建好的二进制，组装多架构 Docker 镜像 ──────────────
+  docker:
+    name: Docker (multi-arch)
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 下载 build job 产出的三个二进制，放入 docker-bin/
+      - name: Download linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: docker-bin
+          merge-multiple: true
+          pattern: iptv-linux-*
+
+      - name: Mark binaries executable
+        run: chmod +x docker-bin/*
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 使用 Dockerfile.prebuilt：直接把 docker-bin/ 里对应平台的二进制
+      # 复制进 alpine 镜像，完全不在 Docker 内重新编译 Rust
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.prebuilt
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/iptv:${{ github.event.inputs.tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/iptv:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 3. 创建 GitHub Release，上传三个平台二进制 ───────────────────
+  release:
+    name: Release
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create Git tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `refs/tags/${{ github.event.inputs.tag }}`,
+              sha: context.sha,
+            })
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: ${{ github.event.inputs.tag }}
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body: |
+            ## Docker
+
+            ```bash
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:${{ github.event.inputs.tag }}
+            ```
+
+            ```bash
+            docker run -d \
+              --name iptv-speed-tester \
+              --restart unless-stopped \
+              -p 3030:3030 \
+              -v ./data:/app/data \
+              ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}:${{ github.event.inputs.tag }}
+            ```
+
+            ## 二进制文件
+
+            | 文件 | 平台 |
+            |---|---|
+            | `iptv-linux-amd64` | Linux x86_64 |
+            | `iptv-linux-arm64` | Linux ARM64（树莓派4 / NAS 等）|
+            | `iptv-linux-armv7` | Linux ARMv7（树莓派3 等）|
+
+            ## 环境变量
+
+            | 环境变量 | 默认值 | 说明 |
+            |---|---|---|
+            | `PORT` | `3030` | 监听端口 |
+            | `WORKERS` | `20` | 并发测速数 |
+            | `TOP` | `5` | 每类型保留最佳源数量 |
+            | `INTERVAL` | `6h` | 更新间隔（支持 6h / 30m / 3600s）|
+            | `URL1`~`URL20` | — | 自定义订阅源地址 |
