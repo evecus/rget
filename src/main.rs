@@ -6,7 +6,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncRead, BufReader, AsyncWriteExt};
+use tokio::io::{AsyncRead, BufReader};
 
 #[derive(Parser, Debug)]
 #[command(name = "rwgt", version, about = "A streaming download and extraction tool")]
@@ -49,7 +49,6 @@ async fn main() -> Result<()> {
     let total_size = response.content_length();
     let mut download_stream = response.bytes_stream();
 
-    // Setup Progress Bar
     let pb = if let Some(size) = total_size {
         ProgressBar::new(size)
     } else {
@@ -61,7 +60,6 @@ async fn main() -> Result<()> {
             .progress_chars("#>-")
     );
 
-    // Step 1: Stream download data into a memory buffer to allow multi-format handling
     let mut buffer = Vec::new();
     while let Some(chunk) = download_stream.next().await {
         let chunk = chunk.context("Error while downloading chunk")?;
@@ -95,11 +93,9 @@ async fn main() -> Result<()> {
         } else if lower_name.ends_with(".zip") {
             unpack_zip(buf_reader, &args.directory, args.executable).await?;
         } else if lower_name.ends_with(".7z") {
-            // 7z requires random access, handle via memory vector
             let inner_vec = buf_reader.into_inner().into_inner();
             unpack_7z(inner_vec, &args.directory, args.executable)?;
         } else if lower_name.ends_with(".gz") {
-            // Raw single .gz file extraction
             let mut decoder = GzipDecoder::new(buf_reader);
             let out_name = if url_filename.ends_with(".gz") {
                 &url_filename[..url_filename.len() - 3]
@@ -122,7 +118,6 @@ async fn main() -> Result<()> {
             anyhow::bail!("Unsupported compression format for auto-extraction");
         }
     } else {
-        // Direct save mode
         let final_filename = args.output.unwrap_or(url_filename);
         let final_path = Path::new(&args.directory).join(final_filename);
 
@@ -235,12 +230,13 @@ async fn unpack_zip<R: AsyncRead + Unpin>(reader: R, target_dir: &str, set_exec:
 }
 
 fn unpack_7z(buffer: Vec<u8>, target_dir: &str, set_exec: bool) -> Result<()> {
-    let cursor = Cursor::new(buffer);
-    let mut archive = sevenz_rust::SevenZReader::new(cursor,七z_len_hint(target_dir))
-        .map_err(|e| anyhow::anyhow!("Failed to open 7z archive: {:?}", e))?;
-
+    let mut cursor = Cursor::new(buffer);
     let target_path = Path::new(target_dir);
     std::fs::create_dir_all(target_path)?;
+
+    // Use standard ASCII helper function name
+    let mut archive = sevenz_rust::SevenZReader::new(&mut cursor, get_sevenz_len_hint(target_dir))
+        .map_err(|e| anyhow::anyhow!("Failed to open 7z archive: {:?}", e))?;
 
     archive.for_each_entries(|entry, reader| {
         let rel_path = Path::new(entry.name());
@@ -274,7 +270,7 @@ fn unpack_7z(buffer: Vec<u8>, target_dir: &str, set_exec: bool) -> Result<()> {
     Ok(())
 }
 
-fn 七z_len_hint(_: &str) -> u64 {
+fn get_sevenz_len_hint(_: &str) -> u64 {
     0
 }
 
