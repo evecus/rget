@@ -145,17 +145,18 @@ async fn unpack_tar<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) 
 
 /// 流式解包 zip 格式
 async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) -> Result<()> {
-    // 引入桥接扩展特征
+    // 引入桥接和 futures 专用的 I/O 特征
     use tokio_util::compat::TokioAsyncReadCompatExt;
-    use tokio_util::compat::FuturesAsyncReadCompatExt; // 新增：用于将 futures 的 Reader 转回 Tokio
+    
+    // 1. 将 Tokio Reader 一键转换成符合 async_zip 胃口的 futures::io::AsyncRead
+    let compat_reader = reader.compat();
+    let mut zip_reader = async_zip::base::read::stream::ZipFileReader::new(compat_reader);
 
-    // 1. 将 Tokio Reader 转换为 async_zip 需要的 futures::io::AsyncRead
-    let mut zip_reader = async_zip::base::read::stream::ZipFileReader::new(reader.compat());
-
-    // 2. 迭代器每次返回一个持锁的 zip_reader (也就是这里的 entry_reader)
+    // 2. 利用 async_zip 原生的迭代流
     while let Some(mut entry_reader) = zip_reader.next_with_entry().await? {
-        // 修正：0.0.16 中应通过 .entry() 获取元数据，而不是 .config()
-        let entry_info = entry_reader.entry();
+        
+        // 🌟 正确拿元数据的解法：在 0.0.16 中，Reading 状态通过 .reader() 方法拿到外部引用的元数据
+        let entry_info = entry_reader.reader().entry();
         let path = Path::new(entry_info.filename());
         
         if path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
@@ -165,17 +166,20 @@ async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) 
         if entry_info.dir() {
             tokio::fs::create_dir_all(path).await?;
         } else {
-            // 如果压缩包内文件有父级目录，先创建它
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            let mut file = tokio::fs::File::create(path).await?;
-            
-            // 修正：entry_reader 实现了 futures::io::AsyncRead。
-            // 必须使用 .compat() 把它包装成符合 tokio::io::AsyncRead 的类型，才能用 tokio::io::copy
-            let mut tokio_compatible_reader = entry_reader.compat();
-            tokio::io::copy(&mut tokio_compatible_reader, &mut file).await?;
+            // 3. 这里的核心冲突在于 entry_reader 实现了 `futures::io::AsyncRead`
+            // 我们不把它强转回 tokio。相反，我们创建一个普通的 std::fs::File 并包装为 futures 兼容的写端：
+            let file = std::fs::File::create(path)?;
+            // 使用 futures 库自带的 AllowStdIo 将标准写端桥接过去
+            let mut futures_writer = futures::io::AllowStdIo::new(file);
+
+            // 使用 futures 库自带的异步 copy 算子进行拷贝，两条都是 futures 派系的流，完美相容！
+            futures::io::copy(&mut entry_reader, &mut futures_writer)
+                .await
+                .context("解压并写入 ZIP 内部文件失败")?;
             
             println!("📄 解压出: {:?}", path);
 
@@ -186,6 +190,7 @@ async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) 
     }
     Ok(())
 }
+
 /// 给文件赋予 755 权限
 #[cfg(unix)]
 fn set_executable(path: &Path) -> Result<()> {
