@@ -21,10 +21,10 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v1
+      uses: actions-rs/toolchain@v2
       with:
         toolchain: stable
         target: ${{ matrix.target }}
@@ -44,7 +44,7 @@ jobs:
         EOF
 
     - name: Build Release
-      uses: actions-rs/cargo@v1
+      uses: actions-rs/cargo@v2
       with:
         command: build
         args: --release --target ${{ matrix.target }}
@@ -56,7 +56,7 @@ jobs:
         cd ../../..
 
     - name: Upload Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: rwgt-linux-${{ matrix.suffix }}
         path: rwgt-linux-${{ matrix.suffix }}.tar.gz
@@ -72,13 +72,13 @@ jobs:
           path: ./artifacts
       
       - name: Download ARM64 Artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: rwgt-linux-arm64-musl
           path: ./artifacts
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v0.1.0
           name: rget v0.1.0
