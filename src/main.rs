@@ -147,30 +147,36 @@ async fn unpack_tar<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) 
 async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) -> Result<()> {
     // 引入桥接扩展特征
     use tokio_util::compat::TokioAsyncReadCompatExt;
+    use tokio_util::compat::FuturesAsyncReadCompatExt; // 新增：用于将 futures 的 Reader 转回 Tokio
 
-    // 核心修改 1：使用 .compat() 将 Tokio 的 AsyncRead 转换为 async_zip 需要的 futures::io::AsyncRead
+    // 1. 将 Tokio Reader 转换为 async_zip 需要的 futures::io::AsyncRead
     let mut zip_reader = async_zip::base::read::stream::ZipFileReader::new(reader.compat());
 
-    // 核心修改 2：async_zip 0.0.16 流式读取特征是 next_with_entry()，而不是 next()
+    // 2. 迭代器每次返回一个持锁的 zip_reader (也就是这里的 entry_reader)
     while let Some(mut entry_reader) = zip_reader.next_with_entry().await? {
-        let path = Path::new(entry_reader.config().filename());
+        // 修正：0.0.16 中应通过 .entry() 获取元数据，而不是 .config()
+        let entry_info = entry_reader.entry();
+        let path = Path::new(entry_info.filename());
         
         if path.to_str().map_or(false, |s| s.starts_with("..") || s.starts_with('/')) {
             continue;
         }
 
-        if entry_reader.config().dir() {
+        if entry_info.dir() {
             tokio::fs::create_dir_all(path).await?;
         } else {
-            // 如果有上级目录但未独立声明，先创建父级目录
+            // 如果压缩包内文件有父级目录，先创建它
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
             let mut file = tokio::fs::File::create(path).await?;
             
-            // entry_reader 本身就是满足 tokio::io::AsyncRead 的（它内部做了处理）
-            tokio::io::copy(&mut entry_reader, &mut file).await?;
+            // 修正：entry_reader 实现了 futures::io::AsyncRead。
+            // 必须使用 .compat() 把它包装成符合 tokio::io::AsyncRead 的类型，才能用 tokio::io::copy
+            let mut tokio_compatible_reader = entry_reader.compat();
+            tokio::io::copy(&mut tokio_compatible_reader, &mut file).await?;
+            
             println!("📄 解压出: {:?}", path);
 
             if set_exec {
