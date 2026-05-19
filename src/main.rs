@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use async_compression::tokio::bufread::{BzDecoder, GzipDecoder, XzDecoder, ZstdDecoder};
 use clap::Parser;
-use futures::stream::TryStreamExt;
+// 核心修复 1: 必须引入 StreamExt，否则 tar 的 entries.next() 无法使用
+use futures::stream::{StreamExt, TryStreamExt};
 use reqwest::Client;
 use std::path::Path;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio_tar::Archive;
+// 核心修复 2: 使用 tokio_util 实现从 futures Stream 到 tokio AsyncRead 的完美桥接
+use tokio_util::io::StreamReader;
 
 /// rwgt - 一个类似 wget 的流式下载解压工具
 #[derive(Parser, Debug)]
@@ -49,11 +52,15 @@ async fn main() -> Result<()> {
 
     println!("🚀 开始下载: {}", args.url);
 
-    // 将 HTTP 流转换为 AsyncRead
-    let stream = response.bytes_stream();
-    let reader = stream
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        .into_async_read();
+    // 将 HTTP 流转换为 Tokio 兼容的 AsyncRead
+    let stream = response
+        .bytes_stream()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    
+    // 使用 StreamReader 直接构建满足 tokio::io::AsyncRead 的流
+    let reader = StreamReader::new(stream);
+    // 用 BufReader 包装，使其完美满足 tokio::io::AsyncBufRead (解压器所需要的特性)
+    let buf_reader = BufReader::new(reader);
 
     if args.unzip {
         println!("📦 检测到 -u 参数，启动流式解压...");
@@ -61,26 +68,26 @@ async fn main() -> Result<()> {
         
         // 根据后缀智能选择解压流
         if lower_name.ends_with(".tar.gz") || lower_name.ends_with(".tgz") {
-            let decoder = GzipDecoder::new(reader);
+            let decoder = GzipDecoder::new(buf_reader);
             unpack_tar(decoder, args.executable).await?;
         } else if lower_name.ends_with(".tar.xz") {
-            let decoder = XzDecoder::new(reader);
+            let decoder = XzDecoder::new(buf_reader);
             unpack_tar(decoder, args.executable).await?;
         } else if lower_name.ends_with(".tar.bz2") {
-            let decoder = BzDecoder::new(reader);
+            let decoder = BzDecoder::new(buf_reader);
             unpack_tar(decoder, args.executable).await?;
         } else if lower_name.ends_with(".tar.zst") {
-            let decoder = ZstdDecoder::new(reader);
+            let decoder = ZstdDecoder::new(buf_reader);
             unpack_tar(decoder, args.executable).await?;
         } else if lower_name.ends_with(".zip") {
             // ZIP 格式的流式解压
-            unpack_zip(reader, args.executable).await?;
+            unpack_zip(buf_reader, args.executable).await?;
         } else {
             println!("⚠️ 无法识别的压缩格式，按原始文件保存为: {}", filename);
-            save_file(reader, &filename, args.executable).await?;
+            save_file(buf_reader, &filename, args.executable).await?;
         }
     } else {
-        save_file(reader, &filename, args.executable).await?;
+        save_file(buf_reader, &filename, args.executable).await?;
     }
 
     println!("✅ 完成!");
@@ -98,13 +105,12 @@ fn extract_filename_from_url(url: &str) -> String {
 }
 
 /// 流式保存单文件
-async fn save_file<R: tokio::io::AsyncRead + Unpin>(reader: R, filename: &str, set_exec: bool) -> Result<()> {
+async fn save_file<R: tokio::io::AsyncRead + Unpin>(mut reader: R, filename: &str, set_exec: bool) -> Result<()> {
     let path = Path::new(filename);
     let mut file = tokio::fs::File::create(path).await.context("创建文件失败")?;
-    let mut buf_reader = tokio::io::BufReader::new(reader);
     
     // 流式拷贝，不占用大内存
-    tokio::io::copy(&mut buf_reader, &mut file).await.context("写入文件失败")?;
+    tokio::io::copy(&mut reader, &mut file).await.context("写入文件失败")?;
     println!("💾 文件已保存至: {}", filename);
 
     if set_exec {
@@ -139,7 +145,8 @@ async fn unpack_tar<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) 
 
 /// 流式解包 zip 格式
 async fn unpack_zip<R: tokio::io::AsyncRead + Unpin>(reader: R, set_exec: bool) -> Result<()> {
-    let mut zip_reader = async_zip::read::stream::ZipFileReader::new(reader);
+    // 核心修复 3: 修正 async_zip 的结构体路径
+    let mut zip_reader = async_zip::base::read::stream::ZipFileReader::new(reader);
 
     while let Some(entry) = zip_reader.next().await {
         let entry = entry?;
